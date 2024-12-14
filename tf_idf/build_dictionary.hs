@@ -22,9 +22,9 @@ buildSet (x:xs) = addSentenceToSet (buildSet xs) x
 
 main :: IO ()
 main = do
-    let test_map = Map.fromList [("1", "testing"),("2", "testing 1"),("3", "testing 2")]
+    let test_map = Map.fromList [("1", "good boy"), ("2", "good girl"), ("3", "boy girl good")]
     let input = "I am testing testing"
-    let test_input = ["Alice went to the market.", "Bob is learning Haskell.", "Charlie loves s loves programming."]
+    let test_input = Map.elems test_map
     let test_set = buildSet test_input
     let filePath = "output.txt"
     saveSetToFile filePath test_set
