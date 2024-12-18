@@ -11,8 +11,19 @@ import Control.Parallel.Strategies (using, parList, rdeepseq)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.Time (diffUTCTime)
 import Control.Concurrent.Async (mapConcurrently)
+import Data.Csv (encode, record)
+import qualified Data.ByteString.Lazy as B
 
 
+createWordMap :: FilePath -> IO (Map.Map String Double)
+createWordMap filePath = 
+    withFile filePath ReadMode $ \handle -> do
+        content <- hGetContents handle
+        content `deepseq` return ()
+        let wordsInFile = lines content
+        let wordMap = Map.fromList [(word, 0) | word <- wordsInFile]
+        -- Return the resulting Map
+        return wordMap
 
 -- Type alias for better readability
 type PassageMap = Map.Map String String
@@ -22,7 +33,7 @@ readPassagesFromDirectory :: FilePath -> IO PassageMap
 readPassagesFromDirectory dir = do
     fileNames <- listDirectory dir    
     let totalFiles = length fileNames
-    passageMaps <- mapConcurrently (processFileWithProgress totalFiles) (zip [1..] fileNames)
+    passageMaps <- mapM (processFileWithProgress totalFiles) (zip [1..] fileNames)
     return $ Map.unions passageMaps
 
 -- Function to process a file with progress tracking
@@ -63,45 +74,46 @@ parseLine line =
         (key:rest) -> (key, unwords rest)  -- Combine the rest into the passage
         _ -> error $ "Invalid line format: " ++ line
 
+-- Save the map to a CSV file
+saveMapToCSV :: FilePath -> Map.Map String Double -> IO ()
+saveMapToCSV path mapData = do
+    let csvData = Map.foldrWithKey (\key value acc -> [key, show value] : acc) [] mapData
+        headers = ["Key", "Value"] -- Headers for CSV
+    B.writeFile path $ encode (headers : csvData) -- Write to file
 
-saveSetToFile :: FilePath -> Set.Set String -> IO ()
-saveSetToFile filePath set = do
-    handle <- openFile filePath WriteMode
-    mapM_ (hPutStrLn handle) (Set.toList set)
-    hClose handle
+idf :: [String] -> (Map.Map String Double) -> (Map.Map String Double)
+idf passages initMap = 
+    let passageSets = map sentenceToSet passages
+        idf_count = foldr addSetToMap initMap passageSets 
+    in idf_count
 
-addSentenceToSet :: Set.Set String -> String -> Set.Set String
-addSentenceToSet set sentence = 
-    let wrds = map (map toLower) (words sentence) 
-    in Set.union (Set.fromList wrds) set
+sentenceToSet sentence = Set.fromList $ map (map toLower) (words sentence)
 
-buildSet :: [String] -> Set.Set String
-buildSet [] = Set.empty
-buildSet (x:xs) = addSentenceToSet (buildSet xs) x
+addSetToMap passage_set doc_count = foldr (\word acc' -> Map.adjust (1.0 +) word acc') doc_count (Set.elems passage_set)
 
-addSetToMap set acc = foldr (\word acc' -> Map.insertWith (+) word 1.0 acc') acc (Set.elems set)
+addDocToMap docMap count = 
+    let passages = Map.elems docMap
+        passageSets = map sentenceToSet passages
+    in foldr addSetToMap count passageSets
+
+idfNormalise x totalDocCount = logBase 2 ((fromIntegral totalDocCount) / x) 
 
 chunk :: Int -> [a] -> [[a]]
 chunk _ [] = []
 chunk n xs = let (ys, zs) = splitAt n xs in ys : chunk n zs
 
-chunkSize = 100
+chunkSize = 1000
 
 main :: IO ()
 main = do
+    let filePath = "output.txt"
+    word_map <- createWordMap filePath
     let dir_path = "/Users/samhitbhogavalli/Documents/parallel_fuctional_programming/team_proj/20k_ver_1/passages/"
     all_passages <- readPassagesFromDirectory dir_path
-    print $ Map.size all_passages
-    let test_input = Map.elems all_passages
-    -- start <- getCurrentTime
-    let par_input = chunk chunkSize test_input
-    print $ length par_input
-    let par_output = map buildSet par_input `using` parList rdeepseq
-    let test_set = Set.unions par_output
-    let filePath = "output.txt"
-    saveSetToFile filePath test_set
-    -- end <- getCurrentTime
-    -- let diff = diffUTCTime end start 
-    -- print diff
-    -- print "Program ended"
-
+    let passage_count = Map.size all_passages
+    print passage_count
+    let passage_chunks = chunk chunkSize (Map.elems all_passages)
+    let par_output = map (\input -> idf input word_map) passage_chunks `using` parList rdeepseq
+    let reduced_output = Map.unionsWith (+) par_output
+    -- let reduced_output = idf (Map.elems all_passages) word_map
+    saveMapToCSV "idf_output_par.csv" (Map.map (\x -> idfNormalise x passage_count) reduced_output)
