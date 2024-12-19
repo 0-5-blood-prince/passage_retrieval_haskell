@@ -102,13 +102,13 @@ createWordMap filePath =
         -- Return the resulting Map
         return wordMap
 
-idf :: [String] -> (Map.Map String Double) -> (Map.Map String Double)
+idf :: [(String, String)] -> (Map.Map String Double) -> (Map.Map String Double)
 idf passages initMap = 
     let passageSets = map sentenceToSet passages
         idf_count = foldr addSetToMap initMap passageSets 
     in idf_count
 
-sentenceToSet sentence = Set.fromList $ map (map toLower) (words sentence)
+sentenceToSet (_, sentence) = Set.fromList $ map (map toLower) (words sentence)
 
 addSetToMap passage_set doc_count = foldr (\word acc' -> Map.adjust (1.0 +) word acc') doc_count (Set.elems passage_set)
 
@@ -120,6 +120,17 @@ addDocToMap docMap count =
 idfNormalise x totalDocCount = logBase 2 ((fromIntegral totalDocCount) / x) 
 -- #######################################
 
+parIdf passage_chunks word_map passage_count = 
+    let par_output_idf = map (\input -> idf input word_map) passage_chunks `using` parList rdeepseq
+        reduced_output = Map.unionsWith (+) par_output_idf
+    in Map.map (\x -> idfNormalise x passage_count) reduced_output
+
+parTf passage_chunks wordOrder norm_idf = 
+    let par_output = map (\t_p_input -> processAndWriteCsv wordOrder t_p_input norm_idf) passage_chunks `using` parList rdeepseq
+    in Map.unions par_output
+
+-- time ./tf_idf_v2_par +RTS -N10 -ls -s   
+-- stack ghc -- -O2 -Wall -threaded -rtsopts -eventlog tf_idf_v2_par
 main :: IO ()
 main = do
     args <- getArgs
@@ -130,20 +141,15 @@ main = do
             wordOrder <- createWordList filePath
             word_map <- createWordMap filePath
             all_passages <- readPassagesFromDirectory dir_path
+            let passage_chunks = chunk chunkSize (Map.toList all_passages)
 
             -- IDF logic
             let passage_count = Map.size all_passages
-            let passage_chunks = chunk chunkSize (Map.elems all_passages)
-            let par_output_idf = map (\input -> idf input word_map) passage_chunks `using` parList rdeepseq
-            let reduced_output = Map.unionsWith (+) par_output_idf
-            let norm_idf = Map.map (\x -> idfNormalise x passage_count) reduced_output
-
-            norm_idf `deepseq` return ()
+            let norm_idf = parIdf passage_chunks word_map passage_count
 
             --TF logic
-            let par_input = chunk chunkSize (Map.toList all_passages)
-            let par_output = map (\t_p_input -> processAndWriteCsv wordOrder t_p_input norm_idf) par_input `using` parList rdeepseq
-            let output = Map.unions par_output
+            -- let par_input = chunk chunkSize (Map.toList all_passages)
+            let output = parTf passage_chunks wordOrder norm_idf
             -- let output = processAndWriteCsv wordOrder (Map.toList all_passages) idf
             saveMapToCSV "tf_idf_par_output.csv" output wordOrder
 
