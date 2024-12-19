@@ -2,7 +2,8 @@ import Data.Word
 import Data.Char (toLower)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import System.IO ( hClose, hPutStrLn, openFile, IOMode(WriteMode), hGetContents, withFile, IOMode(ReadMode), hGetContents )
+import System.IO ( hClose, hPutStrLn, openFile, IOMode(WriteMode), 
+    hGetContents, withFile, IOMode(ReadMode), hGetContents, writeFile )
 import Data.List.Split (splitOn)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
@@ -17,7 +18,8 @@ import qualified Data.Vector as V
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import System.Environment (getArgs)
-
+import Data.ByteString.Lazy (ByteString)
+import Data.ByteString.Lazy.Char8 (unpack, pack)
 
 createWordList :: FilePath -> IO [String]
 createWordList filePath = 
@@ -57,7 +59,8 @@ tfIdf :: [String] -> [String] -> Map.Map String Double -> Map.Map String Double
 tfIdf wordsList passageWords idf =
   let totalWords = fromIntegral (length passageWords)
       wordCounts = Map.fromListWith (+) [(word, 1) | word <- passageWords]
-  in Map.fromList [(word, (fromMaybe 0 (Map.lookup word wordCounts)) * (fromMaybe 0 (Map.lookup word idf)) / totalWords) | word <- wordsList]
+  in Map.fromList [(word, (fromMaybe 0 (Map.lookup word wordCounts)) 
+    * (fromMaybe 0 (Map.lookup word idf)) / totalWords) | word <- wordsList]
 
 -- Convert a map of TF values to a CSV row format
 mapToCsvRow :: [String] -> Map.Map String Double -> String
@@ -65,8 +68,9 @@ mapToCsvRow wordsList tfMap =
   let tfValues = [show (fromMaybe 0 (Map.lookup word tfMap)) | word <- wordsList]
   in intercalate "," tfValues
 
-processAndWriteCsv :: [String] -> [(String, String)] -> Map.Map String Double -> Map.Map String String
-processAndWriteCsv wordsList passages idf =
+tfIdfForAll :: [String] -> [(String, String)] -> 
+    Map.Map String Double -> Map.Map String String
+tfIdfForAll wordsList passages idf =
     let passageMap = Map.fromList passages
     in Map.map (\passage -> 
         let passageWords = words (map toLower passage)
@@ -83,9 +87,10 @@ readMapFromCsv filePath = do
 
 saveMapToCSV :: FilePath -> Map.Map String String -> [String] -> IO ()
 saveMapToCSV path mapData wordList = do
-    let csvData = Map.foldrWithKey (\key value acc -> [key, value] : acc) [] mapData
-        headers = ["passageId", intercalate "," wordList] -- Headers for CSV
-    BL.writeFile path $ Csv.encode (headers : csvData) -- Write to file
+    let csvData = Map.foldrWithKey (\key value acc -> (key++","++value) : acc) [] mapData
+        headers = "passageId" ++","++ intercalate "," wordList
+        encoded_csv = unlines (headers : csvData)
+    writeFile path encoded_csv -- Write to file
 
 chunk :: Int -> [a] -> [[a]]
 chunk _ [] = []
@@ -110,7 +115,8 @@ idf passages initMap =
 
 sentenceToSet (_, sentence) = Set.fromList $ map (map toLower) (words sentence)
 
-addSetToMap passage_set doc_count = foldr (\word acc' -> Map.adjust (1.0 +) word acc') doc_count (Set.elems passage_set)
+addSetToMap passage_set doc_count = foldr 
+    (\word acc' -> Map.adjust (1.0 +) word acc') doc_count (Set.elems passage_set)
 
 addDocToMap docMap count = 
     let passages = Map.elems docMap
@@ -121,12 +127,14 @@ idfNormalise x totalDocCount = logBase 2 ((fromIntegral totalDocCount) / x)
 -- #######################################
 
 parIdf passage_chunks word_map passage_count = 
-    let par_output_idf = map (\input -> idf input word_map) passage_chunks `using` parList rdeepseq
+    let par_output_idf = map (\input -> idf input word_map) 
+            passage_chunks `using` parList rdeepseq
         reduced_output = Map.unionsWith (+) par_output_idf
     in Map.map (\x -> idfNormalise x passage_count) reduced_output
 
 parTf passage_chunks wordOrder norm_idf = 
-    let par_output = map (\t_p_input -> processAndWriteCsv wordOrder t_p_input norm_idf) passage_chunks `using` parList rdeepseq
+    let par_output = map (\t_p_input -> tfIdfForAll wordOrder t_p_input norm_idf) 
+            passage_chunks `using` parList rdeepseq
     in Map.unions par_output
 
 -- time ./tf_idf_v2_par +RTS -N10 -ls -s   
@@ -148,8 +156,6 @@ main = do
             let norm_idf = parIdf passage_chunks word_map passage_count
 
             --TF logic
-            -- let par_input = chunk chunkSize (Map.toList all_passages)
             let output = parTf passage_chunks wordOrder norm_idf
-            -- let output = processAndWriteCsv wordOrder (Map.toList all_passages) idf
             saveMapToCSV "tf_idf_par_output.csv" output wordOrder
 
